@@ -116,24 +116,62 @@ class BackgroundRemovalService:
         try:
             session = self.get_session(model_name)
             
+            # Validation de l'image d'entrée
+            if not image_data or len(image_data) == 0:
+                raise ValueError("Image data is empty")
+            
+            # Test de validité de l'image d'entrée
+            try:
+                test_image = Image.open(io.BytesIO(image_data))
+                test_image.verify()  # Vérifier que l'image est valide
+                logger.info(f"Image d'entrée valide: {test_image.format} {test_image.size}")
+            except Exception as e:
+                logger.error(f"Image d'entrée invalide: {e}")
+                raise ValueError(f"Image d'entrée corrompue: {str(e)}")
+            
             # Supprimer le background
+            logger.info("Début suppression background...")
             output_data = bg(image_data, session=session)
             
+            # Validation des données de sortie
+            if not output_data or len(output_data) == 0:
+                raise ValueError("Rembg returned empty data")
+            
+            logger.info(f"Background supprimé, taille résultat: {len(output_data)} bytes")
+            
             if white_background:
-                # Ajouter un fond blanc
-                image = Image.open(io.BytesIO(output_data)).convert("RGBA")
-                white_bg = Image.new("RGB", image.size, (255, 255, 255))
-                white_bg.paste(image, mask=image.split()[-1])
-                
-                # Convertir en bytes
-                output_buffer = io.BytesIO()
-                white_bg.save(output_buffer, format='JPEG', quality=95)
-                return output_buffer.getvalue()
+                try:
+                    # Ajouter un fond blanc avec validation
+                    image = Image.open(io.BytesIO(output_data)).convert("RGBA")
+                    logger.info(f"Image après rembg: {image.format} {image.size} {image.mode}")
+                    
+                    white_bg = Image.new("RGB", image.size, (255, 255, 255))
+                    white_bg.paste(image, mask=image.split()[-1])
+                    
+                    # Convertir en bytes
+                    output_buffer = io.BytesIO()
+                    white_bg.save(output_buffer, format='JPEG', quality=95)
+                    result = output_buffer.getvalue()
+                    
+                    logger.info(f"Image avec fond blanc créée: {len(result)} bytes")
+                    return result
+                    
+                except Exception as e:
+                    logger.error(f"Erreur lors de l'ajout du fond blanc: {e}")
+                    # Fallback: retourner l'image sans fond blanc
+                    logger.info("Fallback: retour de l'image sans fond blanc")
+                    return output_data
             else:
                 return output_data
                 
+        except ValueError as e:
+            logger.error(f"Erreur de validation: {e}")
+            raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
             logger.error(f"Erreur lors du traitement: {e}")
+            # Log plus détaillé pour débugger
+            import traceback
+            logger.error(f"Stack trace: {traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=f"Erreur de traitement: {str(e)}")
 
 # Instance globale du service
