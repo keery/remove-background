@@ -1,34 +1,42 @@
-#!/usr/bin/env python3
-"""
-Script pour enlever le background des images avec rembg
-Supporte le traitement par lot et différents modèles
-"""
-
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query
+from fastapi.responses import Response
+from fastapi.middleware.cors import CORSMiddleware
+import io
 import os
-import sys
-import argparse
 from pathlib import Path
-from typing import List, Optional
-import time
+from typing import Optional
+import base64
+import logging
 
 try:
-    from rembg import bg, new_session
+    from rembg import remove as bg, new_session
     from PIL import Image
-    import numpy as np
 except ImportError as e:
     print(f"❌ Erreur d'import: {e}")
-    print("Installez les dépendances avec:")
-    print("pip install rembg[gpu] pillow")
-    print("ou")
-    print("pip install rembg pillow")
-    sys.exit(1)
+    raise
 
-class BackgroundRemover:
-    """Classe pour gérer la suppression de background"""
+# Configuration du logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="Background Removal API",
+    description="API pour supprimer le background des images avec rembg",
+    version="1.0.0"
+)
+
+# Configuration CORS pour permettre les appels depuis votre NestJS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # En production, spécifiez vos domaines
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class BackgroundRemovalService:
+    """Service pour gérer la suppression de background"""
     
-    SUPPORTED_FORMATS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'}
-    
-    # Modèles disponibles avec leurs cas d'usage
     MODELS = {
         'u2net': 'Général - Bon équilibre qualité/vitesse',
         'u2net_human_seg': 'Optimisé pour les personnes',
@@ -38,215 +46,189 @@ class BackgroundRemover:
         'silueta': 'Personnes - Rapide'
     }
     
-    def __init__(self, model_name: str = 'u2net'):
-        """
-        Initialise le removeur de background
-        
-        Args:
-            model_name: Nom du modèle à utiliser
-        """
-        if model_name not in self.MODELS:
-            print(f"⚠️  Modèle '{model_name}' non reconnu. Utilisation de 'u2net'")
-            model_name = 'u2net'
-        
-        self.model_name = model_name
-        print(f"🔧 Initialisation du modèle: {model_name}")
-        print(f"   Description: {self.MODELS[model_name]}")
-        
-        try:
-            self.session = new_session(model_name)
-        except Exception as e:
-            print(f"❌ Erreur lors de l'initialisation du modèle: {e}")
-            print("Tentative avec le modèle par défaut...")
-            self.session = new_session('u2net')
+    def __init__(self):
+        self.sessions = {}
+        # Pré-charger le modèle par défaut
+        self.get_session('u2net')
     
-    def remove_background(self, input_path: str, output_path: str, 
-                         add_white_bg: bool = False) -> bool:
+    def get_session(self, model_name: str = 'u2net'):
+        """Récupère ou crée une session pour un modèle"""
+        if model_name not in self.sessions:
+            try:
+                logger.info(f"Initialisation du modèle: {model_name}")
+                self.sessions[model_name] = new_session(model_name)
+            except Exception as e:
+                logger.error(f"Erreur lors de l'initialisation du modèle {model_name}: {e}")
+                # Fallback vers u2net
+                if model_name != 'u2net':
+                    self.sessions[model_name] = self.get_session('u2net')
+                else:
+                    raise
+        return self.sessions[model_name]
+    
+    def remove_background(self, image_data: bytes, model_name: str = 'u2net', 
+                         white_background: bool = False) -> bytes:
         """
-        Enlève le background d'une image
+        Supprime le background d'une image
         
         Args:
-            input_path: Chemin vers l'image d'entrée
-            output_path: Chemin vers l'image de sortie
-            add_white_bg: Ajouter un fond blanc au lieu de transparent
+            image_data: Données de l'image en bytes
+            model_name: Modèle à utiliser
+            white_background: Ajouter un fond blanc au lieu de transparent
             
         Returns:
-            bool: True si succès, False sinon
+            bytes: Image processée
         """
         try:
-            print(f"🔄 Traitement: {os.path.basename(input_path)}")
+            session = self.get_session(model_name)
             
-            # Ouvrir l'image
-            with open(input_path, 'rb') as input_file:
-                input_data = input_file.read()
+            # Supprimer le background
+            output_data = bg(image_data, session=session)
             
-            # Enlever le background
-            output_data = bg.remove(input_data, session=self.session)
-            
-            # Si on veut un fond blanc
-            if add_white_bg:
-                # Convertir en PIL Image
+            if white_background:
+                # Ajouter un fond blanc
                 image = Image.open(io.BytesIO(output_data)).convert("RGBA")
-                
-                # Créer un fond blanc
                 white_bg = Image.new("RGB", image.size, (255, 255, 255))
-                white_bg.paste(image, mask=image.split()[-1])  # Utiliser le canal alpha comme masque
+                white_bg.paste(image, mask=image.split()[-1])
                 
-                # Sauvegarder en JPEG
-                output_path = output_path.replace('.png', '.jpg')
-                white_bg.save(output_path, 'JPEG', quality=95)
+                # Convertir en bytes
+                output_buffer = io.BytesIO()
+                white_bg.save(output_buffer, format='JPEG', quality=95)
+                return output_buffer.getvalue()
             else:
-                # Sauvegarder directement (PNG avec transparence)
-                with open(output_path, 'wb') as output_file:
-                    output_file.write(output_data)
-            
-            print(f"✅ Sauvegardé: {os.path.basename(output_path)}")
-            return True
-            
+                return output_data
+                
         except Exception as e:
-            print(f"❌ Erreur lors du traitement de {input_path}: {e}")
-            return False
-    
-    def process_batch(self, input_dir: str, output_dir: str, 
-                     add_white_bg: bool = False, 
-                     overwrite: bool = False) -> dict:
-        """
-        Traite un dossier d'images
-        
-        Args:
-            input_dir: Dossier d'entrée
-            output_dir: Dossier de sortie
-            add_white_bg: Ajouter un fond blanc
-            overwrite: Écraser les fichiers existants
-            
-        Returns:
-            dict: Statistiques du traitement
-        """
-        input_path = Path(input_dir)
-        output_path = Path(output_dir)
-        
-        if not input_path.exists():
-            print(f"❌ Dossier d'entrée introuvable: {input_dir}")
-            return {'success': 0, 'failed': 0, 'skipped': 0}
-        
-        # Créer le dossier de sortie
-        output_path.mkdir(parents=True, exist_ok=True)
-        
-        # Trouver toutes les images
-        image_files = []
-        for ext in self.SUPPORTED_FORMATS:
-            image_files.extend(input_path.glob(f"*{ext}"))
-            image_files.extend(input_path.glob(f"*{ext.upper()}"))
-        
-        if not image_files:
-            print(f"❌ Aucune image trouvée dans {input_dir}")
-            return {'success': 0, 'failed': 0, 'skipped': 0}
-        
-        print(f"📁 Trouvé {len(image_files)} image(s) à traiter")
-        
-        stats = {'success': 0, 'failed': 0, 'skipped': 0}
-        start_time = time.time()
-        
-        for i, img_file in enumerate(image_files, 1):
-            # Définir le nom de sortie
-            if add_white_bg:
-                output_file = output_path / f"{img_file.stem}_no_bg.jpg"
-            else:
-                output_file = output_path / f"{img_file.stem}_no_bg.png"
-            
-            # Vérifier si le fichier existe déjà
-            if output_file.exists() and not overwrite:
-                print(f"⏭️  Ignoré (existe déjà): {img_file.name}")
-                stats['skipped'] += 1
-                continue
-            
-            print(f"[{i}/{len(image_files)}] ", end="")
-            
-            # Traiter l'image
-            if self.remove_background(str(img_file), str(output_file), add_white_bg):
-                stats['success'] += 1
-            else:
-                stats['failed'] += 1
-        
-        # Afficher les statistiques
-        elapsed_time = time.time() - start_time
-        print(f"\n📊 Traitement terminé en {elapsed_time:.2f}s")
-        print(f"   ✅ Succès: {stats['success']}")
-        print(f"   ❌ Échecs: {stats['failed']}")
-        print(f"   ⏭️  Ignorés: {stats['skipped']}")
-        
-        return stats
+            logger.error(f"Erreur lors du traitement: {e}")
+            raise HTTPException(status_code=500, detail=f"Erreur de traitement: {str(e)}")
 
-def list_available_models():
-    """Affiche la liste des modèles disponibles"""
-    print("🤖 Modèles disponibles:")
-    for model, description in BackgroundRemover.MODELS.items():
-        print(f"   • {model}: {description}")
+# Instance globale du service
+bg_service = BackgroundRemovalService()
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Enlever le background des images avec rembg",
-        formatter_class=argparse.RawTextHelpFormatter
-    )
+@app.get("/")
+async def root():
+    """Point de santé de l'API"""
+    return {
+        "message": "Background Removal API",
+        "status": "running",
+        "models": list(BackgroundRemovalService.MODELS.keys())
+    }
+
+@app.get("/health")
+async def health():
+    """Health check pour Google Cloud Run"""
+    return {"status": "healthy"}
+
+@app.get("/models")
+async def list_models():
+    """Liste les modèles disponibles"""
+    return {
+        "models": BackgroundRemovalService.MODELS
+    }
+
+@app.post("/remove-background")
+async def remove_background_endpoint(
+    image: UploadFile = File(..., description="Image à traiter"),
+    model: str = Query('u2net', description="Modèle à utiliser"),
+    white_bg: bool = Query(False, description="Ajouter un fond blanc"),
+    format: str = Query('png', description="Format de sortie (png/jpeg)")
+):
+    """
+    Supprime le background d'une image uploadée
+    """
+    # Vérifier le type de fichier
+    if not image.content_type.startswith('image/'):
+        raise HTTPException(status_code=400, detail="Le fichier doit être une image")
     
-    parser.add_argument('input', help='Fichier image ou dossier d\'entrée')
-    parser.add_argument('-o', '--output', help='Fichier ou dossier de sortie')
-    parser.add_argument('-m', '--model', default='u2net', 
-                       choices=list(BackgroundRemover.MODELS.keys()),
-                       help='Modèle à utiliser (défaut: u2net)')
-    parser.add_argument('--white-bg', action='store_true',
-                       help='Ajouter un fond blanc au lieu de transparent')
-    parser.add_argument('--overwrite', action='store_true',
-                       help='Écraser les fichiers existants')
-    parser.add_argument('--list-models', action='store_true',
-                       help='Lister les modèles disponibles')
+    # Vérifier le modèle
+    if model not in BackgroundRemovalService.MODELS:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Modèle '{model}' non supporté. Modèles disponibles: {list(BackgroundRemovalService.MODELS.keys())}"
+        )
     
-    args = parser.parse_args()
-    
-    if args.list_models:
-        list_available_models()
-        return
-    
-    # Vérifier les arguments
-    input_path = Path(args.input)
-    if not input_path.exists():
-        print(f"❌ Fichier/dossier d'entrée introuvable: {args.input}")
-        return
-    
-    # Déterminer le chemin de sortie
-    if args.output:
-        output_path = args.output
-    else:
-        if input_path.is_file():
-            # Fichier unique
-            suffix = "_no_bg.jpg" if args.white_bg else "_no_bg.png"
-            output_path = str(input_path.parent / f"{input_path.stem}{suffix}")
+    try:
+        # Lire l'image
+        image_data = await image.read()
+        logger.info(f"Traitement d'une image de {len(image_data)} bytes avec le modèle {model}")
+        
+        # Traiter l'image
+        result_data = bg_service.remove_background(
+            image_data, 
+            model_name=model,
+            white_background=white_bg
+        )
+        
+        # Déterminer le type de contenu
+        if white_bg or format.lower() == 'jpeg':
+            media_type = "image/jpeg"
+            filename = "result.jpg"
         else:
-            # Dossier
-            output_path = str(input_path.parent / f"{input_path.name}_no_bg")
+            media_type = "image/png"
+            filename = "result.png"
+        
+        return Response(
+            content=result_data,
+            media_type=media_type,
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+        
+    except Exception as e:
+        logger.error(f"Erreur lors du traitement: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/remove-background-base64")
+async def remove_background_base64(
+    request: dict,
+):
+    """
+    Supprime le background d'une image encodée en base64
     
-    print(f"🚀 Démarrage du traitement...")
-    print(f"   📥 Entrée: {args.input}")
-    print(f"   📤 Sortie: {output_path}")
-    print(f"   🤖 Modèle: {args.model}")
-    print(f"   🎨 Fond: {'Blanc' if args.white_bg else 'Transparent'}")
-    
-    # Initialiser le removeur
-    remover = BackgroundRemover(args.model)
-    
-    # Traitement
-    if input_path.is_file():
-        # Fichier unique
-        success = remover.remove_background(args.input, output_path, args.white_bg)
-        if success:
-            print(f"🎉 Terminé ! Image sauvegardée: {output_path}")
-        else:
-            print("❌ Échec du traitement")
-    else:
-        # Dossier
-        stats = remover.process_batch(args.input, output_path, args.white_bg, args.overwrite)
-        if stats['success'] > 0:
-            print(f"🎉 Traitement terminé ! {stats['success']} image(s) traitée(s)")
+    Body: {
+        "image": "base64_string",
+        "model": "u2net",
+        "white_bg": false
+    }
+    """
+    try:
+        # Extraire les paramètres
+        image_b64 = request.get('image')
+        model = request.get('model', 'u2net')
+        white_bg = request.get('white_bg', False)
+        
+        if not image_b64:
+            raise HTTPException(status_code=400, detail="Image base64 manquante")
+        
+        # Décoder l'image
+        try:
+            image_data = base64.b64decode(image_b64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Format base64 invalide")
+        
+        # Traiter l'image
+        result_data = bg_service.remove_background(
+            image_data,
+            model_name=model,
+            white_background=white_bg
+        )
+        
+        # Encoder le résultat en base64
+        result_b64 = base64.b64encode(result_data).decode('utf-8')
+        
+        return {
+            "success": True,
+            "image": result_b64,
+            "model_used": model,
+            "white_background": white_bg
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erreur lors du traitement base64: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
