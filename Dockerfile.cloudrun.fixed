@@ -1,0 +1,30 @@
+# Dockerfile optimisé pour Cloud Run - Résolution du crash
+FROM python:3.11-slim
+
+# Variables d'environnement Cloud Run optimisées
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PORT=8080
+
+# Installation des dépendances système nécessaires pour rembg
+RUN apt-get update && apt-get install -y \
+    libglib2.0-0 libsm6 libxext6 libxrender-dev \
+    libgomp1 libgl1-mesa-glx \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copie et installation des dépendances Python
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# CRITIQUE: Ne PAS pré-charger le modèle au build pour éviter le crash
+# Le modèle sera chargé à la première demande
+
+# Copie du code
+COPY . .
+
+EXPOSE 8080
+
+# Commande de démarrage simple
+CMD ["python", "main.py"]

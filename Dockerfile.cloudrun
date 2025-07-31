@@ -1,0 +1,31 @@
+# Dockerfile optimisé pour Google Cloud Run
+FROM python:3.11-slim
+
+# Variables d'environnement pour optimiser Cloud Run
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PORT=8080
+
+# Installation des dépendances système
+RUN apt-get update && apt-get install -y \
+    libglib2.0-0 libsm6 libxext6 libxrender-dev \
+    libgomp1 libgl1-mesa-glx curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copie et installation des dépendances Python
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Pré-chargement du modèle (optionnel, peut être supprimé si problème de mémoire au démarrage)
+# RUN python -c "from rembg import new_session; new_session('u2net')"
+
+# Copie du code
+COPY . .
+
+# Configuration pour Cloud Run
+EXPOSE 8080
+
+# Commande de démarrage optimisée pour Cloud Run
+CMD exec gunicorn --bind :$PORT --workers 1 --worker-class uvicorn.workers.UvicornWorker --timeout 300 main:app

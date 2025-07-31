@@ -25,6 +25,40 @@ app = FastAPI(
     version="1.0.0"
 )
 
+import time
+
+# Middleware de logging pour débugger
+@app.middleware("http")
+async def log_requests(request, call_next):
+    start_time = time.time()
+    
+    # Log de la requête entrante
+    client_ip = request.client.host if request.client else 'unknown'
+    logger.info(f"🌐 {request.method} {request.url.path} - Client: {client_ip}")
+    
+    # Log de la taille du body pour les POST
+    if request.method == "POST":
+        body = await request.body()
+        logger.info(f"📦 Body size: {len(body)} bytes")
+        # Reconstruire la requête pour que FastAPI puisse la lire
+        async def receive():
+            return {"type": "http.request", "body": body}
+        request._receive = receive
+    
+    try:
+        # Traiter la requête
+        response = await call_next(request)
+        
+        # Log de la réponse
+        process_time = time.time() - start_time
+        logger.info(f"⚡ Réponse {response.status_code} en {process_time:.2f}s")
+        
+        return response
+    except Exception as e:
+        process_time = time.time() - start_time
+        logger.error(f"💥 Erreur après {process_time:.2f}s: {str(e)}")
+        raise
+
 # Configuration CORS pour permettre les appels depuis votre NestJS
 app.add_middleware(
     CORSMiddleware,
@@ -186,34 +220,46 @@ async def remove_background_base64(
     
     Body: {
         "image": "base64_string",
-        "model": "u2net",
+        "model": "u2net", 
         "white_bg": false
     }
     """
+    logger.info(f"🔄 Nouvelle requête reçue: {len(str(request))} chars")
+    
     try:
         # Extraire les paramètres
         image_b64 = request.get('image')
         model = request.get('model', 'u2net')
         white_bg = request.get('white_bg', False)
         
+        logger.info(f"📋 Paramètres: model={model}, white_bg={white_bg}, image_size={len(image_b64) if image_b64 else 0}")
+        
         if not image_b64:
+            logger.error("❌ Image base64 manquante")
             raise HTTPException(status_code=400, detail="Image base64 manquante")
         
         # Décoder l'image
         try:
+            logger.info("🔍 Décodage base64...")
             image_data = base64.b64decode(image_b64)
-        except Exception:
+            logger.info(f"✅ Image décodée: {len(image_data)} bytes")
+        except Exception as e:
+            logger.error(f"❌ Erreur décodage base64: {e}")
             raise HTTPException(status_code=400, detail="Format base64 invalide")
         
         # Traiter l'image
+        logger.info("🤖 Début du traitement...")
         result_data = bg_service.remove_background(
             image_data,
             model_name=model,
             white_background=white_bg
         )
+        logger.info(f"✅ Traitement terminé: {len(result_data)} bytes")
         
         # Encoder le résultat en base64
+        logger.info("📦 Encodage du résultat...")
         result_b64 = base64.b64encode(result_data).decode('utf-8')
+        logger.info(f"✅ Résultat encodé: {len(result_b64)} chars")
         
         return {
             "success": True,
@@ -225,7 +271,9 @@ async def remove_background_base64(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Erreur lors du traitement base64: {e}")
+        logger.error(f"❌ Erreur lors du traitement base64: {e}")
+        import traceback
+        logger.error(f"Stack trace: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
